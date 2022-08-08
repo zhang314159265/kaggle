@@ -31,6 +31,8 @@ class Classifier(nn.Module):
         # out = self.softmax(out)
         return out
 
+ModelClass = Classifier
+
 def gen_batch(all_x, all_y, batch_size, shuffle=False):
     if shuffle:
         nitem = len(all_x)
