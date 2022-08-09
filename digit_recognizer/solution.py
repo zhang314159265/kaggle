@@ -7,6 +7,8 @@ from typing import Tuple
 import os
 import pathlib
 
+from mylib import gen_batch, train_with, infer_for, calc_score
+
 # args
 train_data_path = "data/train.csv"
 test_data_path = "data/test.csv"
@@ -68,55 +70,7 @@ class ClassifierCNN(nn.Module):
 
 ModelClass = ClassifierCNN
 
-def gen_batch(all_x, all_y, batch_size, shuffle=False):
-    if shuffle:
-        nitem = len(all_x)
-        shuf = list(range(nitem))
-        random.shuffle(shuf)
-        all_x = all_x[shuf]
-        if all_y is not None:
-            all_y = all_y[shuf]
-
-    start = 0
-    while start < len(all_x):
-        x = all_x[start : start + batch_size]
-        y = all_y[start : start + batch_size] if all_y is not None else None
-
-        if all_y is not None:
-            yield x, y
-        else:
-            yield x
-        start += len(x)
-    
-def train_with(model, all_x, all_y):
-    assert len(all_x) == len(all_y)
-
-    loss_fn = nn.CrossEntropyLoss()
-    optim = torch.optim.SGD(model.parameters(), lr=0.01)
-    for epoch_id in range(nepoch):
-        print(f"Epoch {epoch_id + 1}/{nepoch}")
-        for inp, label in gen_batch(all_x, all_y, train_batch_size, shuffle=True):
-            out = model(inp)
-            loss = loss_fn(out, label).sum()
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-
-@torch.no_grad()
-def infer_for(model, all_x):
-    all_predicted = torch.LongTensor()
-    for x in gen_batch(all_x, None, 32):
-        out = model(x)
-        predicted = out.argmax(dim=1)
-        all_predicted = torch.cat([all_predicted, predicted])
-    return all_predicted
-
-def calc_score(predicted, ans):
-    assert(len(predicted) == len(ans))
-    assert(predicted.dim() == 1)
-    assert(len(predicted) > 0)
-    return (predicted == ans).sum().item() / len(predicted)
-
+   
 def get_training_data() -> Tuple[torch.Tensor, torch.Tensor]:
     # TODO: recover the original cwd
     os.chdir(str(pathlib.Path(__file__).parent))
@@ -145,7 +99,7 @@ def main():
 
     all_x, all_y = get_training_data()
     ntrain = int(len(all_x) * split_ratio)
-    train_with(model, all_x[:ntrain], all_y[:ntrain])
+    train_with(model, all_x[:ntrain], all_y[:ntrain], nepoch=nepoch, batch_size=train_batch_size)
     predicted = infer_for(model, all_x[ntrain:])
     score = calc_score(predicted, all_y[ntrain:])
     print(f"Test score is {score}")
