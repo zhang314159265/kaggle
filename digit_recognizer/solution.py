@@ -5,18 +5,22 @@ import numpy as np
 import random
 
 # args
-# train_data_path = "data/tiny-train.csv"
 train_data_path = "data/train.csv"
 test_data_path = "data/test.csv"
-# test_data_path = "data/tiny-test.csv"
 
 train_batch_size = 128
 split_ratio = 0.7
 nepoch = 100 # 1 epoch has really poor perf
 
-class Classifier(nn.Module):
+shrink = False
+if shrink:
+    nepoch = 2
+    train_data_path = "data/tiny-train.csv"
+    test_data_path = "data/tiny-test.csv"
+
+class ClassifierDNN(nn.Module):
     def __init__(self):
-        super(Classifier, self).__init__()
+        super(ClassifierDNN, self).__init__()
         self.linear1 = nn.Linear(784, 100)
         self.relu1 = nn.ReLU()
         self.linear2 = nn.Linear(100, 10)
@@ -31,7 +35,35 @@ class Classifier(nn.Module):
         # out = self.softmax(out)
         return out
 
-ModelClass = Classifier
+class ClassifierCNN(nn.Module):
+    def __init__(self):
+        super(ClassifierCNN, self).__init__()
+
+        # in: 1 x 28 x 28
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 3, 5), # out: 3 x 24 x 24
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2), # out: 3 x 12 x 12
+            nn.Conv2d(3, 10, 5), # out: 10 x 8 x 8
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2), # out: 10 x 4 x 4
+        )
+
+        self.flatten_size = 160
+        # in: flatten_size
+        self.mlp = nn.Sequential(
+            nn.Linear(self.flatten_size, 40),
+            nn.ReLU(),
+            nn.Linear(40, 10),
+        )
+
+    def forward(self, inp):
+        inp = inp.view(inp.size(0), 1, 28, 28) # a single channel
+        inp = self.conv(inp)
+        inp = inp.view(inp.size(0), self.flatten_size)
+        return self.mlp(inp)
+
+ModelClass = ClassifierCNN
 
 def gen_batch(all_x, all_y, batch_size, shuffle=False):
     if shuffle:
@@ -95,7 +127,7 @@ def main():
 
     ntrain = int(len(all_x) * split_ratio)
 
-    model = Classifier()
+    model = ModelClass()
     train_with(model, all_x[:ntrain], all_y[:ntrain])
     predicted = infer_for(model, all_x[ntrain:])
     score = calc_score(predicted, all_y[ntrain:])
