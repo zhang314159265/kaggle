@@ -2,6 +2,8 @@
 - [Competition Link](https://www.kaggle.com/competitions/cifar-10/overview)
 - [The CIFAR-10 dataset](https://www.cs.toronto.edu/~kriz/cifar.html)
 - [An Example ResNet Model in PyTorch for cifar10](https://www.kaggle.com/code/toygarr/resnet-implementation-for-image-classification)
+- [PyTorch official ResNet implementation](https://pytorch.org/hub/pytorch_vision_resnet/)
+  - [code link](https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py)
 
 # Goal
 0.5 score (median number)

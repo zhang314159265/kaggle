@@ -22,19 +22,25 @@ def gen_batch(all_x, all_y, batch_size, shuffle=False):
             yield x
         start += len(x)
 
-def train_with(model, all_x, all_y, nepoch, batch_size, get_score=None):
+def train_with(model, all_x, all_y, nepoch, batch_size, get_score=None, print_stats_inside_epoch=False):
     assert len(all_x) == len(all_y)
 
     loss_fn = nn.CrossEntropyLoss()
     optim = torch.optim.SGD(model.parameters(), lr=0.01)
     print("Start training...")
     for epoch_id in range(nepoch):
+        tot_batch = int((len(all_x) + batch_size - 1) / batch_size)
+        trained_batch = 0
         for inp, label in gen_batch(all_x, all_y, batch_size, shuffle=True):
             out = model(inp)
             loss = loss_fn(out, label).sum()
             optim.zero_grad()
             loss.backward()
             optim.step()
+
+            trained_batch += 1
+            if trained_batch % 1 == 0:
+                print(f"  trained batch {trained_batch}/{tot_batch}, epoch {epoch_id + 1}")
         score = None
         if get_score:
             score = get_score()

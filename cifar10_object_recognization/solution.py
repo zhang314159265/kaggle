@@ -51,7 +51,85 @@ class ClassifierCNN(nn.Module):
         inp = inp.view(inp.size(0), self.flatten_size)
         return self.mlp(inp)
 
-ModelClass = ClassifierCNN
+class BasicBlock(nn.Module):
+    def __init__(self, in_channel, out_channel):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channel)
+        self.downsample = None
+        
+        # TODO check how this control flow is handled in Executorch/TorchDynamo etc.
+        # Note this control flow is not data dependent
+        if out_channel != in_channel:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channel, out_channel, kernel_size=1),
+                nn.BatchNorm2d(out_channel)
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # TODO check how this control flow is handled in Executorch/TorchDynamo etc.
+        # Note this control flow is not data dependent
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+        return out
+
+class ClassifierResNet(nn.Module):
+    def __init__(self, block=BasicBlock, layers=[2, 2, 2, 2]):
+        """
+        default to 18 layer ResNet
+        """
+        super().__init__()
+        self.prep = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        )
+        self.layer0 = self.make_layer(block, 64, 64, layers[0])
+        self.layer1 = self.make_layer(block, 64, 128, layers[1])
+        self.layer2 = self.make_layer(block, 128, 256, layers[2])
+        self.layer3 = self.make_layer(block, 256, 512, layers[3])
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512, 10)
+
+    def make_layer(self, block, in_channel, out_channel, num_blocks):
+        layers = []
+        for _ in range(num_blocks):
+            layers.append(block(in_channel, out_channel))
+            in_channel = out_channel
+        return nn.Sequential(*layers)
+        
+    def forward(self, inp):
+        out = self.prep(inp)
+
+        out = self.layer0(out)
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+
+        out = self.avgpool(out)
+        out = torch.flatten(out, 1)
+        out = self.fc(out)
+        return out
+
+# ModelClass = ClassifierCNN
+ModelClass = ClassifierResNet
 
 labelStr2Int : Dict[str, int] = {
     "airplane": 0,
@@ -196,7 +274,7 @@ def main():
         predicted = infer_for(model, all_x[ntrain:])
         score = calc_score(predicted, all_y[ntrain:])
         return score
-    train_with(model, all_x[:ntrain], all_y[:ntrain], nepoch=nepoch, batch_size=128, get_score=get_score)
+    train_with(model, all_x[:ntrain], all_y[:ntrain], nepoch=nepoch, batch_size=128, get_score=get_score, print_stats_inside_epoch=True)
 
     test_prediction = infer_for(model, get_test_data())
     out_df = pd.DataFrame(data={"id": list(range(1, len(test_prediction) + 1)), "label": [convertLabelInt2Str(elem.item()) for elem in test_prediction]})
