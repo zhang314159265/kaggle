@@ -2,3 +2,5 @@
 .*.swo
 __pycache__/
 TODO
+
+cifar10_object_recognization/data/

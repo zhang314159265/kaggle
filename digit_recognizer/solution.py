@@ -3,6 +3,9 @@ import torch
 from torch import nn
 import numpy as np
 import random
+from typing import Tuple
+import os
+import pathlib
 
 # args
 train_data_path = "data/train.csv"
@@ -12,7 +15,7 @@ train_batch_size = 128
 split_ratio = 0.7
 nepoch = 100 # 1 epoch has really poor perf
 
-shrink = False
+shrink = True
 if shrink:
     nepoch = 2
     train_data_path = "data/tiny-train.csv"
@@ -91,7 +94,6 @@ def train_with(model, all_x, all_y):
     loss_fn = nn.CrossEntropyLoss()
     optim = torch.optim.SGD(model.parameters(), lr=0.01)
     for epoch_id in range(nepoch):
-        # import pdb; pdb.set_trace()
         print(f"Epoch {epoch_id + 1}/{nepoch}")
         for inp, label in gen_batch(all_x, all_y, train_batch_size, shuffle=True):
             out = model(inp)
@@ -115,7 +117,9 @@ def calc_score(predicted, ans):
     assert(len(predicted) > 0)
     return (predicted == ans).sum().item() / len(predicted)
 
-def main():
+def get_training_data() -> Tuple[torch.Tensor, torch.Tensor]:
+    # TODO: recover the original cwd
+    os.chdir(str(pathlib.Path(__file__).parent))
     train_data = pd.read_csv(train_data_path)
     all_x : np.ndarray = train_data.loc[:, train_data.columns != "label"].values
     all_y : np.ndarray = train_data["label"].values
@@ -124,18 +128,29 @@ def main():
     all_x = torch.Tensor(all_x)
     all_x = all_x / 255 # normalize
     all_y = torch.LongTensor(all_y)
+    return all_x, all_y
 
-    ntrain = int(len(all_x) * split_ratio)
+def get_test_data() -> torch.Tensor:
+    # TODO: recover the original cwd
+    os.chdir(str(pathlib.Path(__file__).parent))
+    test_data = pd.read_csv(test_data_path)
+    test_data = torch.Tensor(test_data.values) / 255 # normalize
+    return test_data
 
+def get_example_batch(batch_size=32) -> torch.Tensor:
+    return get_test_data()[:batch_size]
+
+def main():
     model = ModelClass()
+
+    all_x, all_y = get_training_data()
+    ntrain = int(len(all_x) * split_ratio)
     train_with(model, all_x[:ntrain], all_y[:ntrain])
     predicted = infer_for(model, all_x[ntrain:])
     score = calc_score(predicted, all_y[ntrain:])
     print(f"Test score is {score}")
 
-    test_data = pd.read_csv(test_data_path)
-    test_data = torch.Tensor(test_data.values) / 255 # normalize
-    test_prediction = infer_for(model, test_data)
+    test_prediction = infer_for(model, get_test_data())
     out_df = pd.DataFrame(data={"ImageId": list(range(1, len(test_prediction) + 1)), "Label": test_prediction})
     out_df.to_csv("/tmp/submission.csv", index=False)
     print("bye")
