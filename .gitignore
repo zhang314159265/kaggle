@@ -4,3 +4,4 @@ __pycache__/
 TODO
 
 cifar10_object_recognization/data/
+disaster_tweets/data/
