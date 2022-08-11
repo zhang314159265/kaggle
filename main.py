@@ -1,4 +1,5 @@
-from digit_recognizer.solution import ModelClass, get_example_batch
+# from digit_recognizer.solution import ModelClass, get_example_batch
+from cifar10_object_recognization.solution import ModelClass, get_example_batch
 from torch import fx
 import torch
 

@@ -270,6 +270,9 @@ def get_test_data() -> torch.Tensor:
 
     return normalize(test_data)
 
+def get_example_batch(batch_size=32) -> torch.Tensor:
+    return get_test_data()[:batch_size]
+
 def main():
     model = ModelClass()
     model.to(device=device)
