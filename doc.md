@@ -1,3 +1,4 @@
 I have implemented the following models
 - DNN: digit-recognizer
-- CNN: digit-recognizer
+- CNN: digit-recognizer, cifar10
+- ResNet: cifar10

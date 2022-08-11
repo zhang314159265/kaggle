@@ -12,6 +12,7 @@
 - CNN
   - without normalization: 0.09980 (just like a random guess..)
   - with normalization: 0.41260 (not too bad)
+- ResNet
+  - BasicBlock on GPU 0.67720
 
-# Scratch
-- TODO: use ResNet
+For ResNet, GPU trains faster than CPU.

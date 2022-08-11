@@ -29,6 +29,11 @@ def train_with(model, all_x, all_y, nepoch, batch_size, get_score=None, print_st
     optim = torch.optim.SGD(model.parameters(), lr=0.01)
     print("Start training...")
     for epoch_id in range(nepoch):
+        # get_score may change model to eval mode. Need set model to train mode
+        # again for each epoch.
+        model.train()
+        assert model.training
+
         tot_batch = int((len(all_x) + batch_size - 1) / batch_size)
         trained_batch = 0
         for inp, label in gen_batch(all_x, all_y, batch_size, shuffle=True):
@@ -39,7 +44,7 @@ def train_with(model, all_x, all_y, nepoch, batch_size, get_score=None, print_st
             optim.step()
 
             trained_batch += 1
-            if trained_batch % 1 == 0:
+            if trained_batch % 50 == 0:
                 print(f"  trained batch {trained_batch}/{tot_batch}, epoch {epoch_id + 1}")
         score = None
         if get_score:
@@ -52,7 +57,9 @@ def train_with(model, all_x, all_y, nepoch, batch_size, get_score=None, print_st
 
 @torch.no_grad()
 def infer_for(model, all_x):
-    all_predicted = torch.LongTensor()
+    model.eval()
+    assert not model.training
+    all_predicted = torch.LongTensor().to(device=all_x.device)
     for x in gen_batch(all_x, None, 32):
         out = model(x)
         predicted = out.argmax(dim=1)

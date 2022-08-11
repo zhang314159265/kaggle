@@ -19,11 +19,15 @@ split_ratio = 0.8
 max_train = 50000
 max_test = 300000
 nepoch = 15
+# device = "cuda"
+device = "cpu"
 
-shrink = False
+assert torch.cuda.is_available() or device != "cuda"
+
+shrink = True
 if shrink:
-    max_train = 100
-    max_test = 10
+    max_train = 1000
+    max_test = 1000
     nepoch = 2
 
 class ClassifierCNN(nn.Module):
@@ -268,7 +272,10 @@ def get_test_data() -> torch.Tensor:
 
 def main():
     model = ModelClass()
+    model.to(device=device)
     all_x, all_y = get_training_data()
+    all_x = all_x.to(device=device)
+    all_y = all_y.to(device=device)
     ntrain = int(len(all_x) * split_ratio)
     def get_score():
         predicted = infer_for(model, all_x[ntrain:])
@@ -276,7 +283,7 @@ def main():
         return score
     train_with(model, all_x[:ntrain], all_y[:ntrain], nepoch=nepoch, batch_size=128, get_score=get_score, print_stats_inside_epoch=True)
 
-    test_prediction = infer_for(model, get_test_data())
+    test_prediction = infer_for(model, get_test_data().to(device=device))
     out_df = pd.DataFrame(data={"id": list(range(1, len(test_prediction) + 1)), "label": [convertLabelInt2Str(elem.item()) for elem in test_prediction]})
     out_df.to_csv("/tmp/submission.csv", index=False)
     print("bye");
