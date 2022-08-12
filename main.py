@@ -1,6 +1,6 @@
-# from digit_recognizer.solution import ModelClass, get_example_batch
+from digit_recognizer.solution import ModelClass, get_example_batch
 # from cifar10_object_recognization.solution import ModelClass, get_example_batch
-from disaster_tweets.solution import ModelClass, get_example_batch
+# from disaster_tweets.solution import ModelClass, get_example_batch
 from torch import fx
 import torch
 
@@ -21,11 +21,21 @@ graph(inp):
     return linear2
 """
 
-trace_solution = "fx_trace"
-# trace_solution = "dispatch_trace"
+# cmd = "fx_trace"
+cmd = "dispatch_trace"
+# cmd = "torch_package"
 
-if trace_solution == "fx_trace":
+if cmd == "fx_trace":
     fx_trace(model) # fail for disaster_tweets. TODO debug this
-elif trace_solution == "dispatch_trace":
+elif cmd == "dispatch_trace":
     print("Start dispatch_tree...")
     torch_dispatch_trace(model, get_example_batch(batch_size=2))
+elif cmd == "torch_package":
+    from torch.package import PackageExporter
+    with PackageExporter("/tmp/my.torchpackage") as exporter:
+        exporter.intern("digit_recognizer.solution")
+        exporter.intern("mylib")
+        for x in ["pandas", "numpy"]:
+            exporter.extern(x)
+        exporter.save_pickle("my_resources", "model.pkl", model)
+    print("Try torch package done")

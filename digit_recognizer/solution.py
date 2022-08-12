@@ -8,6 +8,7 @@ import os
 import pathlib
 
 from mylib import gen_batch, train_with, infer_for, calc_score
+from mylib.chdir import chdir
 
 # args
 train_data_path = "data/train.csv"
@@ -72,24 +73,22 @@ ModelClass = ClassifierCNN
 
    
 def get_training_data() -> Tuple[torch.Tensor, torch.Tensor]:
-    # TODO: recover the original cwd
-    os.chdir(str(pathlib.Path(__file__).parent))
-    train_data = pd.read_csv(train_data_path)
-    all_x : np.ndarray = train_data.loc[:, train_data.columns != "label"].values
-    all_y : np.ndarray = train_data["label"].values
-
-    # convert numpy.ndarray to Tensor
-    all_x = torch.Tensor(all_x)
-    all_x = all_x / 255 # normalize
-    all_y = torch.LongTensor(all_y)
-    return all_x, all_y
+    with chdir(str(pathlib.Path(__file__).parent)):
+        train_data = pd.read_csv(train_data_path)
+        all_x : np.ndarray = train_data.loc[:, train_data.columns != "label"].values
+        all_y : np.ndarray = train_data["label"].values
+    
+        # convert numpy.ndarray to Tensor
+        all_x = torch.Tensor(all_x)
+        all_x = all_x / 255 # normalize
+        all_y = torch.LongTensor(all_y)
+        return all_x, all_y
 
 def get_test_data() -> torch.Tensor:
-    # TODO: recover the original cwd
-    os.chdir(str(pathlib.Path(__file__).parent))
-    test_data = pd.read_csv(test_data_path)
-    test_data = torch.Tensor(test_data.values) / 255 # normalize
-    return test_data
+    with chdir(str(pathlib.Path(__file__).parent)):
+        test_data = pd.read_csv(test_data_path)
+        test_data = torch.Tensor(test_data.values) / 255 # normalize
+        return test_data
 
 def get_example_batch(batch_size=32) -> torch.Tensor:
     return get_test_data()[:batch_size]
