@@ -6,4 +6,4 @@
 0.8 score
 
 # Result
-Following the example solution, I get 0.83297 .
+Following the example solution, I get 0.84155 .

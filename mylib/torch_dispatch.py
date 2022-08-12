@@ -1,5 +1,6 @@
 import torch
 from contextlib import contextmanager
+from torch.utils._pytree import tree_map
 
 @contextmanager
 def no_dispatch():
@@ -23,10 +24,11 @@ class DispatchTensor(torch.Tensor):
 
 @torch.no_grad()
 def torch_dispatch_trace(model, inp):
-    # TODO use pytree to handle container types
-    assert isinstance(inp, torch.Tensor)
-    inp_wrap = DispatchTensor(inp)
-    return model(inp_wrap)
+    inp_wrap = tree_map(DispatchTensor, inp)
+    if isinstance(inp_wrap, dict):
+        return model(**inp_wrap)
+    else:
+        return model(inp_wrap)
 
 if __name__ == "__main__":
     x = DispatchTensor(torch.randn(5))

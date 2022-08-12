@@ -3,11 +3,14 @@ import pathlib
 import re
 import string
 from datasets import Dataset
+from functools import lru_cache
+from torch.utils.data import DataLoader
 from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments, default_data_collator, Trainer
 
 proj_folder = str(pathlib.Path(__file__).parent)
+max_length = 64
 
-shrink=False
+shrink=True
 
 def remove_url(text):
     url = re.compile(r"https?://\S+|www\.\S+")
@@ -37,22 +40,27 @@ def remove_punct(text):
     table = str.maketrans("", "", string.punctuation)
     return text.translate(table)
 
-def main():
-    tokenizer = BertTokenizer.from_pretrained("bert-large-uncased")
+def get_model():
+    return BertForSequenceClassification.from_pretrained("bert-large-uncased")
 
-    # The loaded model is pre-trained. The data for this kaggle contest
-    # will be used to fine-tune the model. This is a kind of transfer learning.
-    model = BertForSequenceClassification.from_pretrained("bert-large-uncased")
+# A bit hacky since get_model is not really a PyTorch nn.Module class
+ModelClass = get_model
 
+@lru_cache(maxsize=None)
+def get_tokenizer():
+    return BertTokenizer.from_pretrained("bert-large-uncased")
+
+def get_training_data():
+    """
+    Return a pair of train/valid dataset
+    """
     train = pd.read_csv(f"{proj_folder}/data/train.csv")
-    print(train["text"].head())
     train["clean_text"] = train["text"].apply(remove_url)
     train["clean_text"] = train["clean_text"].apply(remove_emoji)
     train["clean_text"] = train["clean_text"].apply(remove_html)
     train["clean_text"] = train["clean_text"].apply(remove_punct)
     train["clean_text"] = train["clean_text"].apply(lambda x: x.lower())
-    max_length = 64
-    train["input_ids"] = train["clean_text"].apply(lambda x: tokenizer(x, max_length=max_length, padding="max_length")["input_ids"])
+    train["input_ids"] = train["clean_text"].apply(lambda x: get_tokenizer()(x, max_length=max_length, padding="max_length")["input_ids"])
     train.rename(columns={"target": "labels"}, inplace=True)
     train = train[["input_ids", "labels"]]
 
@@ -65,6 +73,41 @@ def main():
 
     train_ds = Dataset.from_pandas(train_df)
     valid_ds = Dataset.from_pandas(valid_df)
+    return train_ds, valid_ds
+
+def get_test_data():
+    """
+    Return the test dataset
+    """
+    test = pd.read_csv(f"{proj_folder}/data/test.csv")
+    test["clean_text"] = test["text"].apply(remove_url)
+    test["clean_text"] = test["clean_text"].apply(remove_emoji)
+    test["clean_text"] = test["clean_text"].apply(remove_html)
+    test["clean_text"] = test["clean_text"].apply(remove_punct)
+    test["clean_text"] = test["clean_text"].apply(lambda x: x.lower())
+    test["input_ids"] = test["clean_text"].apply(lambda x: get_tokenizer()(x, max_length=max_length, padding="max_length")["input_ids"])
+    test = test[["input_ids"]]
+    if shrink:
+        test = test[:100]
+    
+    test_ds = Dataset.from_pandas(test)
+    return test_ds
+
+def get_example_batch(batch_size=32):
+    ds = get_test_data()
+    dl = DataLoader(
+        ds,
+        batch_size=batch_size,
+        collate_fn=default_data_collator,
+    )
+    return next(iter(dl))
+
+def main():
+    # The loaded model is pre-trained. The data for this kaggle contest
+    # will be used to fine-tune the model. This is a kind of transfer learning.
+    model = get_model()
+
+    train_ds, valid_ds = get_training_data()
 
     batch_size = 16
     args = TrainingArguments(
@@ -86,22 +129,11 @@ def main():
         train_dataset=train_ds,
         eval_dataset=valid_ds,
         data_collator=data_collator,
-        tokenizer=tokenizer,
+        tokenizer=get_tokenizer(),
     )
     trainer.train()
 
-    test = pd.read_csv(f"{proj_folder}/data/test.csv")
-    test["clean_text"] = test["text"].apply(remove_url)
-    test["clean_text"] = test["clean_text"].apply(remove_emoji)
-    test["clean_text"] = test["clean_text"].apply(remove_html)
-    test["clean_text"] = test["clean_text"].apply(remove_punct)
-    test["clean_text"] = test["clean_text"].apply(lambda x: x.lower())
-    test["input_ids"] = test["clean_text"].apply(lambda x: tokenizer(x, max_length=max_length, padding="max_length")["input_ids"])
-    text = test[["input_ids"]]
-    if shrink:
-        test = test[:100]
-    
-    test_ds = Dataset.from_pandas(test)
+    test_ds = get_test_data()
     outputs = trainer.predict(test_ds)
 
     sub = pd.read_csv(f"{proj_folder}/data/sample_submission.csv")
