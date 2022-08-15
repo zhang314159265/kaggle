@@ -21,8 +21,8 @@ graph(inp):
     return linear2
 """
 
-# cmd = "fx_trace"
-cmd = "dispatch_trace"
+cmd = "fx_trace"
+# cmd = "dispatch_trace"
 # cmd = "torch_package"
 
 if cmd == "fx_trace":
