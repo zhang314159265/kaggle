@@ -10,6 +10,8 @@ class MyTracer:
         self.opts = opts
         self.path_filter_re = re.compile(self.opts.path_filter)
 
+        self.last_frame = None
+
     def runpath(self, progname):
         sys.argv = [progname]
         sys.path[0] = os.path.dirname(progname)
@@ -33,17 +35,32 @@ class MyTracer:
             threading.settrace(None)
             sys.settrace(None)
 
+    def print_frameinfo(self, action, frame):
+        code = frame.f_code
+        filename = frame.f_globals.get("__file__", None)
+        classname = ""
+        if "self" in frame.f_locals:
+            classname = str(frame.f_locals["self"].__class__) + "."
+
+        print(f"-- Trace file {filename}, {action} func {classname}{code.co_name}")
+
     def globaltrace(self, frame, why, arg):
+        filename = frame.f_globals.get("__file__", None)
+
+        if not filename or not self.path_filter_re.search(filename):
+            return None
         if why == "call":
-            code = frame.f_code
-            filename = frame.f_globals.get("__file__", None)
-            if filename:
-                if self.path_filter_re.search(filename):
-                    print(f"-- Trace file {filename}, func {code.co_name}")
-                    return self.localtrace
+            self.print_frameinfo("CALL", frame)
+            self.last_frame = frame
+            return self.localtrace
+        # in my test `why` is always 'call'. I never see `why` to be 'return'
 
     def localtrace(self, frame, why, arg):
         if why == "line":
+            if frame != self.last_frame:
+                self.print_frameinfo("RETURN_TO", frame)
+                self.last_frame = frame
+
             filename = frame.f_code.co_filename
             lineno = frame.f_lineno
             bname = os.path.basename(filename)
