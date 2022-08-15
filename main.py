@@ -2,13 +2,10 @@ from digit_recognizer.solution import ModelClass, get_example_batch
 # from cifar10_object_recognization.solution import ModelClass, get_example_batch
 # from disaster_tweets.solution import ModelClass, get_example_batch
 from torch import fx
+from mylib import myfx
 import torch
 
 from mylib.torch_dispatch import torch_dispatch_trace
-
-def fx_trace(model):
-    graph_module = fx.symbolic_trace(model)
-    print(str(graph_module.graph))
 
 model = ModelClass()
 
@@ -21,12 +18,20 @@ graph(inp):
     return linear2
 """
 
-cmd = "fx_trace"
+# cmd = "fx_trace"
+cmd = "myfx_trace"
 # cmd = "dispatch_trace"
 # cmd = "torch_package"
 
 if cmd == "fx_trace":
-    fx_trace(model) # fail for disaster_tweets. TODO debug this
+    # fail for disaster_tweets. TODO debug this
+    graph_module = fx.symbolic_trace(model)
+    print(str(graph_module.graph))
+    print(f"output: {graph_module(get_example_batch(2))}")
+elif cmd == "myfx_trace":
+    graph_module = myfx.symbolic_trace(model)
+    print(str(graph_module.graph))
+    print(f"output: {graph_module(get_example_batch(2))}")
 elif cmd == "dispatch_trace":
     print("Start dispatch_tree...")
     torch_dispatch_trace(model, get_example_batch(batch_size=2))
