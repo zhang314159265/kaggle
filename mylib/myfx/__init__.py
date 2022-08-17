@@ -67,6 +67,83 @@ class _Namespace:
         assert candidate not in self._used_names
         return candidate
 
+class GraphModule(torch.nn.Module):
+    def __init__(self, root, graph, class_name):
+        super().__init__()
+        self.__class__.__name__ = class_name
+        self.graph = graph
+
+        assert isinstance(root, torch.nn.Module)
+
+        for node in graph.nodes:
+            if node.node_type in ["call_module"]:
+                assert isinstance(node.target, str)
+                setattr(self, node.target, getattr(root, node.target))
+
+    @property
+    def code(self) -> str:
+        return self._code
+
+    @property
+    def graph(self):
+        return self._graph
+
+    @graph.setter
+    def graph(self, g):
+        self._graph = g
+        self.recompile()
+
+    def gen_fn_def(self, fn_args):
+        if len(fn_args) == 0 or fn_args[0] != "self":
+            fn_args.insert(0, "self")
+        return f"def forward({', '.join(fn_args)}):"
+
+    def recompile(self):
+        nodes = self.graph.nodes
+        root_module = "self"
+        body = []
+        fn_args = [] # called free_vars in fx.graph.Codegen._gen_python_code
+
+        def _format_target(base, target):
+            return f"{base}.{target}"
+
+        def _format_args(args, kwargs):
+            args_s = ", ".join(repr(a) for a in args)
+            kwargs_s = ", ".join(f"{k} = {repr(v)}" for k, v in kwargs.items())
+
+            if args_s and kwargs_s:
+                return f"{args_s}, {kwargs_s}"
+            return args_s or kwargs_s
+
+        def emit_node(node):
+            if node.node_type == "placeholder":
+                fn_args.append(node.target)
+            elif node.node_type == "call_module":
+                body.append(f"{repr(node)} = {_format_target(root_module, node.target)}({_format_args(node.args, node.kwargs)})")
+                # assert False, "call module"
+            elif node.node_type == "output":
+                assert len(node.args) == 1
+                assert isinstance(node.args[0], Node)
+                body.append(f"return {repr(node.args[0])}")
+            else:
+                raise RuntimeError(f"Could not handle node type: {node.node_type}")
+
+        for node in nodes:
+            emit_node(node)
+
+        prologue = self.gen_fn_def(fn_args)
+        code = "  " + "\n  ".join(body)
+        fn_code = f"""
+{prologue}
+{code}"""
+        self._code = fn_code
+
+        globals_ = {}
+        cls = type(self)
+
+        exec(compile(fn_code, "", "exec"), globals_)
+        cls.forward = globals_["forward"]
+
 class Graph:
     def __init__(self):
         self._root = Node("", "root", "", (), {}) # this is a sentinel
@@ -119,7 +196,7 @@ class Tracer:
         for p, m in self.root.named_modules():
             if m is mod:
                 return p
-        raise RuntimeError("Module not found")
+        raise RuntimeError(f"Module not found: {mod}")
 
     def call_module(self, mod, forward, args, kwargs):
         """
@@ -146,13 +223,13 @@ class Tracer:
 
         torch.nn.Module.__call__ = module_call_wrapper
         out_proxy = fn(*args)
+        torch.nn.Module.__call__ = _orig_module_call
         self.create_node(None, "output", "", (self.unwrap_proxy(out_proxy),), {})
         return self.graph
 
 
 def symbolic_trace(root: torch.nn.Module):
     tracer = Tracer()
-    print(tracer.trace(root))
-    import pdb; pdb.set_trace()
-    # TODO: make sure the captured graph can be executed!
-    assert False, "symbolic_trace ni"
+    graph = tracer.trace(root)
+    name = root.__class__.__name__ if isinstance(root, torch.nn.Module) else root.__name__
+    return GraphModule(root, graph, name)

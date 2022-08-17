@@ -70,6 +70,7 @@ class ClassifierCNN(nn.Module):
         return self.mlp(inp)
 
 ModelClass = ClassifierDNN
+# ModelClass = ClassifierCNN
 
    
 def get_training_data() -> Tuple[torch.Tensor, torch.Tensor]:

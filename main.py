@@ -16,6 +16,13 @@ graph(inp):
     %relu1 : [#users=1] = call_module[target=relu1](args = (%linear1,), kwargs = {})
     %linear2 : [#users=1] = call_module[target=linear2](args = (%relu1,), kwargs = {})
     return linear2
+
+code generated for GraphModule:
+def forward(self, inp):
+    linear1 = self.linear1(inp);  inp = None
+    relu1 = self.relu1(linear1);  linear1 = None
+    linear2 = self.linear2(relu1);  relu1 = None
+    return linear2
 """
 
 # cmd = "fx_trace"
@@ -23,15 +30,21 @@ cmd = "myfx_trace"
 # cmd = "dispatch_trace"
 # cmd = "torch_package"
 
+@torch.no_grad()
+def try_trace(trace_method, model, example_inputs):
+    expected = model(example_inputs)
+    graph_module = trace_method(model)
+    print(str(graph_module.graph))
+    print(f"code: {graph_module.code}")
+    actual = graph_module(example_inputs)
+    assert torch.allclose(expected, actual)
+    print(f"Pass {trace_method}")
+
 if cmd == "fx_trace":
     # fail for disaster_tweets. TODO debug this
-    graph_module = fx.symbolic_trace(model)
-    print(str(graph_module.graph))
-    print(f"output: {graph_module(get_example_batch(2))}")
+    try_trace(fx.symbolic_trace, model, get_example_batch(2))
 elif cmd == "myfx_trace":
-    graph_module = myfx.symbolic_trace(model)
-    print(str(graph_module.graph))
-    print(f"output: {graph_module(get_example_batch(2))}")
+    try_trace(myfx.symbolic_trace, model, get_example_batch(2))
 elif cmd == "dispatch_trace":
     print("Start dispatch_tree...")
     torch_dispatch_trace(model, get_example_batch(batch_size=2))
