@@ -1,4 +1,5 @@
 import torch
+import operator
 
 from torch.utils._pytree import tree_map
 
@@ -11,6 +12,21 @@ class Proxy:
     
     def __getattr__(self, k):
         return Attribute(self, k)
+
+magic_methods = {
+    "add": "{} + {}",
+}
+
+for method in magic_methods:
+    def _scope(method):
+        def impl(*args, **kwargs):
+            tracer = args[0].tracer
+            target = getattr(operator, method)
+            return tracer.create_proxy(None, "call_function", target, args, kwargs)
+        impl.__name__ = method
+        as_magic = f"__{method.strip('_')}__"
+        setattr(Proxy, as_magic, impl)
+    _scope(method)
 
 class Attribute(Proxy):
     def __init__(self, root, attr):
@@ -45,6 +61,15 @@ class Node:
         p, n = self._prev, self._next
         p._next, n._prev = n, p
 
+    def _pretty_print_target(self, target):
+        if isinstance(target, str):
+            return target
+        if hasattr(target, "__module__"):
+            assert hasattr(target, "__name__")
+            if target.__module__ == "_operator":
+                return f"operator.{target.__name__}"
+        assert False, f"_pretty_print_target can not handle {target} yet"
+
     def format_node(self, placeholder_names):
         def _format_arg(xargs):
             return str(tree_map(lambda x: f"%{x}" if isinstance(x, Node) else str(x), xargs)).replace("'", "")
@@ -55,8 +80,8 @@ class Node:
             assert False, "Only support cases with placeholder_names right now"
         elif self.node_type == "output":
             return f"return {self.args[0]}"
-        elif self.node_type in ["call_module", "call_method"]:
-            return f"%{self.name} = {self.node_type}[target={self.target}](args = {_format_arg(self.args)}, kwargs = {_format_arg(self.kwargs)})"
+        elif self.node_type in ["call_function", "call_module", "call_method"]:
+            return f"%{self.name} = {self.node_type}[target={self._pretty_print_target(self.target)}](args = {_format_arg(self.args)}, kwargs = {_format_arg(self.kwargs)})"
         else:
             raise RuntimeError(f"Unexpected node type: {self.node_type}")
 
@@ -134,6 +159,7 @@ class GraphModule(torch.nn.Module):
         return f"def forward({', '.join(fn_args)}):"
 
     def recompile(self):
+        # print(self.graph) # TODO
         nodes = self.graph.nodes
         root_module = "self"
         body = []
@@ -170,6 +196,13 @@ class GraphModule(torch.nn.Module):
                 assert len(node.args) == 1
                 assert isinstance(node.args[0], Node)
                 body.append(f"return {repr(node.args[0])}")
+            elif node.node_type == "call_function":
+                assert callable(node.target)
+                if node.target.__module__ == "_operator" and node.target.__name__ in magic_methods:
+                    assert isinstance(node.args, tuple)
+                    body.append(f"{repr(node)} = {magic_methods[node.target.__name__].format(*(repr(a) for a in node.args))}")
+                    return
+                assert False, "Unsupported cases for call_function"
             else:
                 raise RuntimeError(f"Could not handle node type: {node.node_type}")
 
@@ -197,7 +230,7 @@ class Graph:
 
     def create_node(self, name, node_type, target, args, kwargs):
         assert name is None
-        candidate = target
+        candidate = target.__name__ if callable(target) else target
         name = self._graph_namespace.create_name(candidate)
         n = Node(name, node_type, target, args, kwargs)
         self._insert(n)
@@ -242,7 +275,6 @@ class Tracer:
             return xargs
         else:
             raise RuntimeError(f"argument of type: {type(xargs)}")
-        # return tree_map(lambda x: x.node, xargs)
             
     def create_proxy(self, name, node_type, target, args, kwargs):
         args_ = self.unwrap_proxy(args)

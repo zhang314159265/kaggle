@@ -128,7 +128,8 @@ class ClassifierResNet(nn.Module):
         out = self.layer3(out)
 
         out = self.avgpool(out)
-        out = torch.flatten(out, 1)
+        # out = torch.flatten(out, 1) # myfx can not handle this yet
+        out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
 
