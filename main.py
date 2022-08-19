@@ -32,13 +32,13 @@ cmd = "myfx_trace"
 
 @torch.no_grad()
 def try_trace(trace_method, model, example_inputs):
-    expected = model(example_inputs)
     graph_module = trace_method(model)
     print(str(graph_module.graph))
     print(f"code: {graph_module.code}")
     actual = graph_module(example_inputs)
+    expected = model(example_inputs)
     assert torch.allclose(expected, actual)
-    print(f"Pass {trace_method}")
+    print(f"Pass {trace_method.__module__}.{trace_method.__name__}")
 
 if cmd == "fx_trace":
     # fail for disaster_tweets. TODO debug this

@@ -5,8 +5,22 @@ from torch.utils._pytree import tree_map
 _orig_module_call = torch.nn.Module.__call__
 
 class Proxy:
-    def __init__(self, node):
+    def __init__(self, node, tracer):
         self.node = node
+        self.tracer = tracer
+    
+    def __getattr__(self, k):
+        return Attribute(self, k)
+
+class Attribute(Proxy):
+    def __init__(self, root, attr):
+        # XXX don't need to call super().__init__(...) ?
+        self.root = root
+        self.attr = attr
+        self.tracer = root.tracer
+
+    def __call__(self, *args, **kwargs):
+        return self.tracer.create_proxy(None, "call_method", self.attr, (self.root,) + args, kwargs)
 
 class Node:
     def __init__(self, name, node_type, target, args, kwargs):
@@ -33,7 +47,7 @@ class Node:
 
     def format_node(self, placeholder_names):
         def _format_arg(xargs):
-            return str(tree_map(lambda x: f"%{x}", xargs))
+            return str(tree_map(lambda x: f"%{x}" if isinstance(x, Node) else str(x), xargs)).replace("'", "")
         if self.node_type == "placeholder":
             if placeholder_names is not None:
                 placeholder_names.append(self.target)
@@ -41,7 +55,7 @@ class Node:
             assert False, "Only support cases with placeholder_names right now"
         elif self.node_type == "output":
             return f"return {self.args[0]}"
-        elif self.node_type == "call_module":
+        elif self.node_type in ["call_module", "call_method"]:
             return f"%{self.name} = {self.node_type}[target={self.target}](args = {_format_arg(self.args)}, kwargs = {_format_arg(self.kwargs)})"
         else:
             raise RuntimeError(f"Unexpected node type: {self.node_type}")
@@ -64,7 +78,16 @@ class _Namespace:
         self._used_names = set()
 
     def create_name(self, candidate):
+        candidate = candidate.replace(".", "_")
+        if candidate in self._used_names:
+            base = candidate
+            num = 1
+            candidate = f"{base}_{num}"
+            while candidate in self._used_names:
+                num += 1
+                candidate = f"{base}_{num}"
         assert candidate not in self._used_names
+        self._used_names.add(candidate)
         return candidate
 
 class GraphModule(torch.nn.Module):
@@ -75,10 +98,22 @@ class GraphModule(torch.nn.Module):
 
         assert isinstance(root, torch.nn.Module)
 
+        def _copy_attr(from_module, to_module, target):
+            *prefix, field = target.split(".")
+            for item in prefix:
+                f = getattr(from_module, item)
+                t = getattr(to_module, item, None)
+                if t is None:
+                    t = torch.nn.Module()
+                    setattr(to_module, item, t)
+                from_module, to_module = f, t
+            orig = getattr(from_module, field)
+            setattr(to_module, field, orig)
+
         for node in graph.nodes:
             if node.node_type in ["call_module"]:
                 assert isinstance(node.target, str)
-                setattr(self, node.target, getattr(root, node.target))
+                _copy_attr(root, self, node.target)
 
     @property
     def code(self) -> str:
@@ -105,7 +140,15 @@ class GraphModule(torch.nn.Module):
         fn_args = [] # called free_vars in fx.graph.Codegen._gen_python_code
 
         def _format_target(base, target):
-            return f"{base}.{target}"
+            elems = target.split(".")
+            r = base
+            for e in elems:
+                if e.isidentifier():
+                    r = f"{r}.{e}"
+                else:
+                    # execute this branch for numbers attribute for nn.Sequential
+                    r = f"getattr({r}, '{e}')"
+            return r
 
         def _format_args(args, kwargs):
             args_s = ", ".join(repr(a) for a in args)
@@ -118,6 +161,8 @@ class GraphModule(torch.nn.Module):
         def emit_node(node):
             if node.node_type == "placeholder":
                 fn_args.append(node.target)
+            elif node.node_type == "call_method":
+                body.append(f"{node} = {_format_target(node.args[0], node.target)}({_format_args(node.args[1:], node.kwargs)})")
             elif node.node_type == "call_module":
                 body.append(f"{repr(node)} = {_format_target(root_module, node.target)}({_format_args(node.args, node.kwargs)})")
                 # assert False, "call module"
@@ -184,13 +229,26 @@ class Tracer:
         """
         The method is called create_arg in Fx
         """
-        return tree_map(lambda x: x.node, xargs)
+        if isinstance(xargs, Proxy):
+            return xargs.node
+        elif isinstance(xargs, (tuple, list)):
+            return type(xargs)(self.unwrap_proxy(a) for a in xargs)
+        elif isinstance(xargs, dict):
+            r = {}
+            for k, v in xargs.items():
+                r[k] = self.unwrap_proxy(v)
+            return r
+        elif isinstance(xargs, (int,)):
+            return xargs
+        else:
+            raise RuntimeError(f"argument of type: {type(xargs)}")
+        # return tree_map(lambda x: x.node, xargs)
             
     def create_proxy(self, name, node_type, target, args, kwargs):
         args_ = self.unwrap_proxy(args)
         kwargs_ = self.unwrap_proxy(kwargs)
         node = self.create_node(name, node_type, target, args_, kwargs_)
-        return Proxy(node)
+        return Proxy(node, self)
 
     def path_of_module(self, mod):
         for p, m in self.root.named_modules():
@@ -198,10 +256,18 @@ class Tracer:
                 return p
         raise RuntimeError(f"Module not found: {mod}")
 
+    def is_leaf_module(self, m):
+        # trace through non leaf module. Non leaf modules include
+        # - modules not in torch.nn package
+        # - or torch.nn.Sequencial
+        return m.__module__.startswith("torch.nn") and not isinstance(m, torch.nn.Sequential)
+
     def call_module(self, mod, forward, args, kwargs):
         """
         We don't need the forward method if we don't want to trace through
         """
+        if not self.is_leaf_module(mod):
+            return forward(*args, **kwargs)
         module_qualified_name = self.path_of_module(mod)
         return self.create_proxy(None, "call_module", module_qualified_name, args, kwargs)
 

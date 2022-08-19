@@ -64,13 +64,14 @@ class ClassifierCNN(nn.Module):
         )
 
     def forward(self, inp):
+        # import pdb; pdb.set_trace()
         inp = inp.view(inp.size(0), 1, 28, 28) # a single channel
         inp = self.conv(inp)
         inp = inp.view(inp.size(0), self.flatten_size)
         return self.mlp(inp)
 
-ModelClass = ClassifierDNN
-# ModelClass = ClassifierCNN
+# ModelClass = ClassifierDNN
+ModelClass = ClassifierCNN
 
    
 def get_training_data() -> Tuple[torch.Tensor, torch.Tensor]:
