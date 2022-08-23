@@ -32,7 +32,17 @@ cmd = "fx_trace"
 
 @torch.no_grad()
 def try_trace(trace_method, model, example_inputs):
-    graph_module = trace_method(model)
+    print("Before tracing")
+    if type(model).__module__.startswith("transformers."):
+        # the transformer model
+        concrete_args = {
+            "inputs_embeds": None, 
+            "attention_mask": None,
+        }
+        graph_module = trace_method(model, concrete_args=concrete_args)
+    else:
+        graph_module = trace_method(model)
+    print("After tracing")
     print(str(graph_module.graph))
     print(f"code: {graph_module.code}")
     actual = graph_module(example_inputs)
@@ -41,7 +51,7 @@ def try_trace(trace_method, model, example_inputs):
     print(f"Pass {trace_method.__module__}.{trace_method.__name__}")
 
 if cmd == "fx_trace":
-    # fail for disaster_tweets. TODO debug this
+    # Fx does not work for the transformer model
     try_trace(fx.symbolic_trace, model, get_example_batch(2))
 elif cmd == "myfx_trace":
     try_trace(myfx.symbolic_trace, model, get_example_batch(2))
