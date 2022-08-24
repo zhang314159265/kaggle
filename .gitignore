@@ -2,6 +2,10 @@
 .*.swo
 __pycache__/
 TODO
+*.so
 
 cifar10_object_recognization/data/
 disaster_tweets/data/
+
+build/
+mydynamo.egg-info/

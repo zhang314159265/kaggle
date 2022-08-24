@@ -1,6 +1,6 @@
 # from digit_recognizer.solution import ModelClass, get_example_batch
-# from cifar10_object_recognization.solution import ModelClass, get_example_batch
-from disaster_tweets.solution import ModelClass, get_example_batch
+from cifar10_object_recognization.solution import ModelClass, get_example_batch
+# from disaster_tweets.solution import ModelClass, get_example_batch
 from torch import fx
 from mylib import myfx
 import torch
