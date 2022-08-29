@@ -1,7 +1,7 @@
 import torch
 from torch import nn, fx
 import torchdynamo
-from typing import List
+from typing import List, Any
 from mydynamo import _eval_frame
 import dis
 import sys
@@ -12,6 +12,32 @@ import operator
 import inspect
 import functools
 import dataclasses
+import types
+
+_unique_id_counter = itertools.count()
+
+@dataclasses.dataclass
+class GuardedCode:
+    code: types.CodeType
+
+class _NotProvided:
+    pass
+
+def create_instruction(name, arg=None, argval=_NotProvided):
+    if argval is _NotProvided:
+        argval = arg
+    return dis.Instruction(
+        opname=name,
+        opcode=dis.opmap[name],
+        arg=arg,
+        argval=argval,
+        argrepr=None,
+        offset=None,
+        starts_line=None,
+        is_jump_target=None)
+
+def unique_id(name):
+    return f"{name}_{next(_unique_id_counter)}"
 
 class Source:
     pass
@@ -19,6 +45,9 @@ class Source:
 @dataclasses.dataclass
 class LocalSource(Source):
     local_name: str
+
+    def reconstruct(self, codegen):
+        return [codegen.create_load(self.local_name)]
 
     def name(self):
         return self.local_name
@@ -32,28 +61,121 @@ def proxy_args_kwargs(args, kwargs):
     proxy_kwargs = {key: arg.as_proxy() for key, arg in kwargs.items()}
     return proxy_args, proxy_kwargs
 
+@dataclasses.dataclass
 class GraphArg:
-    pass
+    source: Source
+    example: Any
+
+    def load(self, tx):
+        # return instructions to load the arg
+        return self.source.reconstruct(tx)
+
+    def get_examples(self):
+        return [self.example]
+
+class FakeRootModule(torch.nn.Module):
+    """Trick the constructor of fx.GraphModule"""
+    def __init__(self):
+        super().__init__()
+
+class PyCodegen:
+    def __init__(self, tx):
+        self.tx = tx
+        self._output = []
+        self.code_options = self.tx.output.code_options
+        self.cell_and_freevars = self.tx.cell_and_freevars
+
+    def extend_output(self, insts):
+        assert all(isinstance(x, dis.Instruction) for x in insts)
+        self._output.extend(insts)
+
+    def append_output(self, inst):
+        assert isinstance(inst, dis.Instruction)
+        self._output.append(inst)
+
+    def create_load(self, name):
+        assert name not in self.cell_and_freevars()
+        assert name in self.code_options["co_varnames"], f"{name} missing"
+        return create_instruction(
+            "LOAD_FAST", self.code_options["co_varnames"].index(name), name
+        )
+
+    def create_load_global(self, name, add=False):
+        if add:
+            self.tx.output.update_co_names(name)
+        assert name in self.code_options["co_names"], f"{name} not in co_names"
+        return create_instruction("LOAD_GLOBAL", self.code_options["co_names"].index(name), name)
+        
+    def load_function_name(self, fn_name):
+        return [self.create_load_global(fn_name, add=True)]
+
+    def make_call_generated_code(self, fn_name):
+        self.extend_output(self.load_function_name(fn_name))
+
+        graphargs = self.tx.output.graphargs
+        for arg in graphargs:
+            self.extend_output(arg.load(self))
+
+        self.append_output(create_instruction("CALL_FUNCTION", len(graphargs)))
+
+    def get_instructions(self):
+        return self._output
 
 class OutputGraph(fx.Tracer):
-    def __init__(self):
+    def __init__(self, f_globals, code_options, compiler_fn):
         super().__init__()
         self.graph = torch.fx.Graph()
         self.graphargs = []
+        self.compiler_fn = compiler_fn
+        self.root_globals = f_globals
+        self.output_instructions = []
+        self.code_options = dict(code_options)
 
-    def add_output_instructions(self):
-        pass
+    def update_co_names(self, name):
+        if name not in self.code_options["co_names"]:
+            self.code_options["co_names"] = tuple(self.code_options["co_names"]) + (name,)
 
-    def compile_and_call_fx_graph(self, tx, rv):
+    def add_output_instructions(self, instrs):
+        self.output_instructions.extend(instrs)
+
+    def call_user_compiler(self, gm):
+        compiled_fn = self.compiler_fn(gm, self.example_inputs())
+        assert callable(compiled_fn)
+        return compiled_fn
+
+    def example_inputs(self):
+        result = []
+        for arg in self.graphargs:
+            result.extend(arg.get_examples())
+        return result
+
+    def install_global(self, name, value):
+        # TODO: be able to delete name from root_globals when it's not needed
+        self.root_globals[name] = value
+
+    def compile_and_call_fx_graph(self, tx, rv, root):
+        assert isinstance(root, FakeRootModule)
         self.create_node("output", "output", (self.create_arg(tuple(x.as_proxy() for x in rv)),), {})
-        print(f"compile_and_call_fx_graph graph is:")
-        self.graph.print_tabular()
-        import pdb; pdb.set_trace() # TODO
+
+        gm = fx.GraphModule(root, self.graph)
+        gm.recompile()
+        compiled_fn = self.call_user_compiler(gm)
+        # TODO wrap compiled_fn by disabling dynamo before calling it
+        name = unique_id("__compiled_fn")
+        self.install_global(name, compiled_fn)
+
+        cg = PyCodegen(tx)
+        cg.make_call_generated_code(name)
+        return cg.get_instructions()
 
     def compile_subgraph(self, tx):
         stack_values = list(tx.stack)
+        root = FakeRootModule()
         # do we really need reverse the stack_values?
-        self.compile_and_call_fx_graph(tx, list(reversed(stack_values)))
+        self.add_output_instructions(
+            self.compile_and_call_fx_graph(tx, list(reversed(stack_values)), root)
+            + [create_instruction("UNPACK_SEQUENCE", len(stack_values))]
+        )
 
     def create_graph_input(self, name):
         placeholders = [n for n in self.graph.nodes if n.op == "placeholder"]
@@ -87,8 +209,11 @@ class VariableBuilder:
     def __call__(self, value):
         return self._wrap(value).clone()
 
+    def get_source(self):
+        return self.source
+
     def wrap_tensor(self, value):
-        self.tx.output.graphargs.append(GraphArg())
+        self.tx.output.graphargs.append(GraphArg(self.get_source(), value))
         return TensorVariable.create(
             tx=self.tx,
             proxy=self.tx.output.create_graph_input(self.name),
@@ -221,17 +346,25 @@ def stack_op(fn):
     return impl
 
 class InstructionTranslator:
-    def __init__(self, code, instructions, f_globals, f_locals):
-        self.code = code
+    def __init__(self, code_options, instructions, f_globals, f_locals, compiler_fn):
+        self.code_options = code_options
         self.instructions = instructions
         self.instruction_pointer = 0
         self.current_instruction = None
         self.f_globals = f_globals
         self.stack = []
-        self.output = OutputGraph()
+        self.output = OutputGraph(f_globals, self.code_options, compiler_fn)
+        vars = list(code_options["co_varnames"])
+        vars.extend(x for x in self.cell_and_freevars() if x not in vars)
         self.symbolic_locals = {
-            k: VariableBuilder(self, LocalSource(k))(f_locals[k]) for k in self.code.co_varnames if k in f_locals
+            k: VariableBuilder(self, LocalSource(k))(f_locals[k]) for k in vars if k in f_locals
         }
+
+    def cell_and_freevars(self):
+        if not hasattr(self, "_cell_and_freevars"):
+            self._cell_and_freevars = tuple(
+                self.code_options["co_cellvars"] or []) + tuple(self.code_options["co_freevars"] or [])
+        return self._cell_and_freevars
 
     def call_function(self, fn, args, kwargs):
         assert isinstance(fn, VariableTracker)
@@ -307,10 +440,20 @@ class InstructionTranslator:
     def RETURN_VALUE(self, inst):
         self.instruction_poiner = None
         self.output.compile_subgraph(self)
-        self.output.add_output_instructions()
+        self.output.add_output_instructions([create_instruction("RETURN_VALUE")])
 
     BINARY_SUBTRACT = stack_op(operator.sub)
-        
+
+def assemble(instructions, firstlineno):
+    lnotab = [] # empty so far
+    code = []
+    
+    for inst in instructions:
+        arg = inst.arg or 0
+        assert arg >= 0 and arg <= 255
+        code.extend((inst.opcode, arg & 0xFF))
+    return bytes(code), bytes(lnotab)
+
 def orig_fn(x, y):
     a = torch.cos(x)
     b = torch.sin(y)
@@ -343,6 +486,13 @@ def try_dynamo():
 def try_mydynamo():
     print("Try mydynamo")
 
+    def compiler_fn(gm, example_inputs):
+        print("Compile graph:")
+        gm.graph.print_tabular()
+        print(f"  with inputs: {example_inputs}")
+        print(f"Code:\n{gm.code}")
+        return gm.forward
+
     def callback(frame):
         """
         Exception thrown from callback will abort _PyEval_EvalFrameDefault since
@@ -355,13 +505,49 @@ def try_mydynamo():
             print(f"  {instr}")
 
         try:
+            keys = [ # must be a list rather than set to retain order
+                "co_argcount",
+                "co_posonlyargcount",
+                "co_kwonlyargcount",
+                "co_nlocals",
+                "co_stacksize",
+                "co_flags",
+                "co_code",
+                "co_consts",
+                "co_names",
+                "co_varnames",
+                "co_filename",
+                "co_name",
+                "co_firstlineno",
+                "co_lnotab",
+                "co_freevars",
+                "co_cellvars",
+            ]
+            code_options = {k: getattr(code, k) for k in keys}
+    
             tracer = InstructionTranslator(
-                code,
+                code_options,
                 instructions,
                 frame.f_globals,
-                frame.f_locals)
+                frame.f_locals,
+                compiler_fn)
 
             tracer.run()
+            output = tracer.output
+            code_options.update(output.code_options)
+            instructions[:] = output.output_instructions
+            print("new instruction:");
+            for instr in instructions:
+                print(f"  {instr}")
+
+            bytecode, lnotab = assemble(instructions, code.co_firstlineno)
+
+            code_options["co_code"] = bytecode
+            code_options["co_nlocals"] = len(code_options["co_varnames"])
+            code_options["co_lnotab"] = lnotab
+            code = types.CodeType(*[code_options[k] for k in keys]) 
+            guarded_code = GuardedCode(code)
+            return guarded_code
         except Exception as e:
             print(f"Got exception {e}")
             traceback.print_exc()
