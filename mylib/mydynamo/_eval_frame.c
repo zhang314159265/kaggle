@@ -1,4 +1,5 @@
 #include <Python.h>
+#include <frameobject.h>
 
 PyObject* registered_callback;
 static PyObject* set_eval_frame(PyObject *new_callback);
@@ -10,6 +11,29 @@ static inline PyObject *call_callback(PyObject *callable, PyObject *frame) {
   return result;
 }
 
+PyObject *eval_custom_code(PyThreadState *tstate, PyFrameObject *frame, PyCodeObject *newcode, int throw_flag) {
+  Py_ssize_t nlocals_new = newcode->co_nlocals;
+  Py_ssize_t nlocals_old = frame->f_code->co_nlocals;
+  assert(nlocals_new >= nlocals_old);
+  assert(newcode->co_flags & CO_NOFREE);
+
+  PyFrameObject *newframe = PyFrame_New(tstate, newcode, frame->f_globals, NULL);
+  assert(newframe);
+
+  // setup newframe->f_localsplus
+  PyObject **fastlocals_old = frame->f_localsplus;
+  PyObject **fastlocals_new = newframe->f_localsplus;
+
+  for (Py_ssize_t i = 0; i < nlocals_old; ++i) {
+    Py_XINCREF(fastlocals_old[i]);
+    fastlocals_new[i] = fastlocals_old[i];
+  }
+
+  PyObject *result = _PyEval_EvalFrameDefault(tstate, newframe, throw_flag);
+  Py_DECREF(newframe);
+  return result;
+}
+
 static PyObject *custom_eval_func(PyThreadState *tstate, PyFrameObject *frame, int throw_flag) {
   assert(registered_callback != Py_None);
 
@@ -17,11 +41,23 @@ static PyObject *custom_eval_func(PyThreadState *tstate, PyFrameObject *frame, i
   // make sure we don't call the callback itself when evaluate the frame for
   // the callback. That will cause infinite loop.
   set_eval_frame(Py_None);
-  call_callback(callback, (PyObject*) frame);
+  PyObject* result = call_callback(callback, (PyObject*) frame);
   set_eval_frame(callback);
 
-  PyObject* ret = _PyEval_EvalFrameDefault(tstate, frame, throw_flag);
-  return ret;
+  assert(result != NULL && "Call back fails");
+ 
+  if (result != Py_None) {
+    // call the original code/frame
+    PyCodeObject* newcode = (PyCodeObject*) PyObject_GetAttrString(result, "code");
+    assert(newcode != NULL);
+    Py_DECREF(result);
+    PyObject* ret = eval_custom_code(tstate, frame, newcode, throw_flag);
+    return ret;
+  } else {
+    // use the default eval function
+    Py_DECREF(result);
+    return _PyEval_EvalFrameDefault(tstate, frame, throw_flag);
+  }
 }
 
 static void set_default_eval_func() {
