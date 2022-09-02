@@ -23,15 +23,15 @@ def run(dynamo_mod, orig_fn, inputs):
         print(f"Code:\n{gm.code}")
         return gm.forward
 
-    expected_res = orig_fn(*inputs)
     opt_fn = dynamo_mod.optimize(compiler_fn)(orig_fn)
     actual_res = opt_fn(*inputs)
+    expected_res = orig_fn(*inputs)
     assert torch.allclose(expected_res, actual_res)
     print(f"Pass test! Result is {actual_res}")
 
 # fn_args = [orig_fn, (torch.randn(10), torch.randn(10))]
-fn_args = [ModelClass(), [get_example_batch(),]]
+fn_args = [ModelClass(), [get_example_batch(2),]]
 
 run([torchdynamo, mydynamo][
-0
+1
 ], *fn_args)

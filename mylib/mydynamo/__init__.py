@@ -3,6 +3,8 @@ from torch import nn, fx
 import torchdynamo
 from typing import List, Any
 from mydynamo import _eval_frame
+import os
+import re
 import dis
 import sys
 from mylib import misc
@@ -13,6 +15,58 @@ import inspect
 import functools
 import dataclasses
 import types
+import math
+
+
+SKIP_DIRS = [
+    os.path.dirname(__file__) + "/",
+]
+
+def skipfiles_check(filename):
+    skip_re = re.compile(f"{'|'.join(SKIP_DIRS)}")
+    return bool(skip_re.match(filename))
+
+class _MyDynamoContext:
+    def __init__(self, callback):
+        self.callback = callback
+
+    def __call__(self, orig_fn):
+        # for nn.Module, optimize the forward method directly
+        if isinstance(orig_fn, torch.nn.Module):
+            mod = orig_fn
+            optimized_forward = self(mod.forward)
+
+            class MyDynamoNNModuleWrapper:
+                def __getattr__(self, name):
+                    return getattr(mod, name)
+
+                def forward(self, *args, **kwargs):
+                    return optimized_forward(*args, **kwargs)
+
+                def __call__(self, *args, **kwargs):
+                    return self.forward(*args, **kwargs)
+
+            new_mod = MyDynamoNNModuleWrapper()
+            return new_mod
+
+        def fn_wrapper(*args):
+            prior = _eval_frame.set_eval_frame(self.callback)
+            try:
+                res = orig_fn(*args)
+            finally:
+                _eval_frame.set_eval_frame(prior)
+            return res
+
+        return fn_wrapper
+
+class DisableContext(_MyDynamoContext):
+    def __init__(self):
+        super().__init__(callback=None)
+
+def disable(fn):
+    assert fn is not None
+    assert callable(fn)
+    return DisableContext()(fn)
 
 _unique_id_counter = itertools.count()
 
@@ -52,8 +106,45 @@ class LocalSource(Source):
     def name(self):
         return self.local_name
 
+class AttrSource(Source):
+    base: Source
+    member: str
+
+    def __init__(self, base, member):
+        super().__init__()
+        assert "." not in member
+        self.base = base
+        self.member = member
+
+    def name(self):
+        return f"{self.base.name()}.{self.member}"
+
+# def is_allowed(obj):
+#     return obj in {torch, torch.sin, torch.cos}
+
+@functools.lru_cache(None)
+def _allowed_function_ids():
+    torch_object_ids = dict()
+
+    def _find_torch_objects(module):
+        torch_object_ids[id(module)] = module.__name__ 
+        # convert items to list to avoid:
+        #   RuntimeError: dictionary changed size during iteration
+        for name, obj in list(module.__dict__.items()):
+            if id(obj) not in torch_object_ids: # to avoid circular reference
+                if isinstance(obj, types.ModuleType):
+                    if obj.__name__.startswith("torch."):
+                        _find_torch_objects(obj)
+                elif id(obj) not in torch_object_ids:
+                    torch_object_ids[id(obj)] = f"{module.__name__}.{name}"
+
+    _find_torch_objects(torch)
+    _find_torch_objects(math)
+
+    return torch_object_ids
+
 def is_allowed(obj):
-    return obj in {torch, torch.sin, torch.cos}
+    return id(obj) in _allowed_function_ids()
 
 def proxy_args_kwargs(args, kwargs):
     """VariableTracker's to proxy's"""
@@ -75,8 +166,10 @@ class GraphArg:
 
 class FakeRootModule(torch.nn.Module):
     """Trick the constructor of fx.GraphModule"""
-    def __init__(self):
+    def __init__(self, nn_modules):
         super().__init__()
+        for k, v in nn_modules.items():
+            setattr(self, k, v)
 
 class PyCodegen:
     def __init__(self, tx):
@@ -130,6 +223,7 @@ class OutputGraph(fx.Tracer):
         self.root_globals = f_globals
         self.output_instructions = []
         self.code_options = dict(code_options)
+        self.nn_modules = dict()
 
     def update_co_names(self, name):
         if name not in self.code_options["co_names"]:
@@ -160,6 +254,7 @@ class OutputGraph(fx.Tracer):
         gm = fx.GraphModule(root, self.graph)
         gm.recompile()
         compiled_fn = self.call_user_compiler(gm)
+        compiled_fn = disable(compiled_fn)
         # TODO wrap compiled_fn by disabling dynamo before calling it
         name = unique_id("__compiled_fn")
         self.install_global(name, compiled_fn)
@@ -170,7 +265,7 @@ class OutputGraph(fx.Tracer):
 
     def compile_subgraph(self, tx):
         stack_values = list(tx.stack)
-        root = FakeRootModule()
+        root = FakeRootModule(self.nn_modules)
         # do we really need reverse the stack_values?
         self.add_output_instructions(
             self.compile_and_call_fx_graph(tx, list(reversed(stack_values)), root)
@@ -199,6 +294,27 @@ class OutputGraph(fx.Tracer):
         rv = super().create_proxy(op, target, args, kwargs, name)
         return rv
 
+    def add_submodule(self, mod, *names, **options):
+        assert isinstance(mod, torch.nn.Module)
+        source = options["source"]
+
+        def wrap_name(module_key):
+            return NNModuleVariable(type(mod), module_key, **options)
+
+        for k, v in self.nn_modules.items():
+            if v is mod:
+                # already exists
+                return wrap_name(k)
+
+        # create a new unique name
+        name = re.sub(r"[^a-zA-Z0-9]", "_", "_".join(map(str, names)))
+        assert name not in self.nn_modules
+        self.nn_modules[name] = mod
+        return wrap_name(name)
+
+    def get_submodule(self, keys):
+        return self.nn_modules[keys]
+
 class VariableBuilder:
     """Wrap a python value in a VariableTracker() instance"""
     def __init__(self, tx, source):
@@ -225,10 +341,19 @@ class VariableBuilder:
             return self.wrap_tensor(value)
         elif is_allowed(value):
             return TorchVariable(value)
+        elif isinstance(value, torch.nn.Module):
+            return self.tx.output.add_submodule(
+                value,
+                self.name,
+                source=self.get_source(),
+            )
         else:
             assert False, f"_wrap can not handled {value}"
 
 class VariableTracker:
+    def __init__(self, source=None):
+        self.source = source
+
     def clone(self, **kwargs):
         """nop for now"""
         return self
@@ -242,6 +367,41 @@ class VariableTracker:
             return True
         except NotImplementedError:
             return False
+
+class NNModuleVariable(VariableTracker):
+    def __init__(self, module_type, module_key, **kwargs):
+        super().__init__(**kwargs)
+        self.module_type = module_type
+        self.module_key = module_key
+        assert self.source
+
+    def var_getattr(self, tx, name):
+        assert self.source
+        source = AttrSource(self.source, name)
+        base = tx.output.get_submodule(self.module_key)
+        base_dict = object.__getattribute__(base, "__dict__")
+        if name in base_dict:
+            subobj = base_dict[name]
+        elif name in base_dict["_modules"]:
+            subobj = base_dict["_modules"][name]
+        else:
+            assert False, "NYI"
+        # TODO: why wrap source in NNModuleSource?
+        # return VariableBuilder(tx, NNModuleSource(source))(subobj)
+        return VariableBuilder(tx, source)(subobj)
+
+    def call_function(self, tx, args, kwargs):
+        mod = tx.output.get_submodule(self.module_key)
+        assert is_allowed(mod.__class__)
+        proxy=tx.output.create_proxy(
+            "call_module",
+            self.module_key,
+            *proxy_args_kwargs(args, kwargs),
+        )
+        return TensorVariable.create(
+            tx=tx,
+            proxy=proxy,
+        )
 
 class TorchVariable(VariableTracker):
     def __init__(self, value, **kwargs):
@@ -276,6 +436,8 @@ class BuiltinVariable(VariableTracker):
     def call_getattr(self, tx, obj, name_var):
         assert name_var.is_python_constant(), "non-const getattr() name"
         name = name_var.as_python_constant()
+        if isinstance(obj, NNModuleVariable):
+            return obj.var_getattr(tx, name)
         if isinstance(obj, TorchVariable):
             member = getattr(obj.value, name)
             assert is_allowed(member), f"{member} is not allowed"
@@ -325,9 +487,9 @@ class TensorVariable(VariableTracker):
         self.proxy = proxy
 
     @classmethod
-    def create(cls, tx, example_value, proxy=None):
-        if example_value  is None:
-            # TODO: we need create fake tensor here
+    def create(cls, tx, example_value=None, proxy=None):
+        if example_value is None:
+            # TODO: we need create fake tensor and setup example value here
             return cls(proxy)
 
         assert isinstance(example_value, torch.Tensor), f"Got example_value {example_value}"
@@ -461,18 +623,22 @@ def create_callback(compiler_fn):
         the latter assumes no ongoing exceptions.
         """
         code = frame.f_code
-    
+
         # Fx generated forward method
         # Torchdynamo uses torchdynamo.disable method to skip these calls
-        if code.co_filename.startswith("<eval_with_key>."):
-            return
-    
-        if code.co_filename in map(lambda mod: mod.__file__, [
-        ]):
+        # We should follow the way torchdynamo does so the methods called by
+        # the generated forward method will not be translated.
+        # if code.co_filename.startswith("<eval_with_key>."):
+        #     return
+
+        if skipfiles_check(code.co_filename):
             return None # skip
+    
         instructions = list(dis.get_instructions(code))
         print(f"frame: filename {frame.f_code.co_filename}, func name {frame.f_code.co_name}")
-        traceback.print_stack(f=frame)
+
+
+        # traceback.print_stack(f=frame)
         for instr in instructions:
             print(f"  {instr}")
     
@@ -521,7 +687,7 @@ def create_callback(compiler_fn):
             guarded_code = GuardedCode(code)
             return guarded_code
         except Exception as e:
-            print(f"Got exception {e}")
+            print(f"Got exception: {e}")
             traceback.print_exc()
             tracer.dump_stack()
             raise e
@@ -529,12 +695,5 @@ def create_callback(compiler_fn):
 
 def optimize(compiler_fn):
     def opt_wrapper(orig_fn):
-        def fn_wrapper(*args):
-            _eval_frame.set_eval_frame(create_callback(compiler_fn))
-            try:
-                res = orig_fn(*args)
-            finally:
-                _eval_frame.set_eval_frame(None)
-            return res
-        return fn_wrapper
+        return _MyDynamoContext(create_callback(compiler_fn))(orig_fn)
     return opt_wrapper 
