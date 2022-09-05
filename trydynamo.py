@@ -13,7 +13,7 @@ def orig_fn(x, y):
     res = a - b
     return res
 
-def run(dynamo_mod, orig_fn, inputs):
+def run(dynamo_mod, orig_fn, inputs, backend=None):
     print(f"Try {dynamo_mod}")
 
     def compiler_fn(gm, example_inputs):
@@ -23,7 +23,10 @@ def run(dynamo_mod, orig_fn, inputs):
         print(f"Code:\n{gm.code}")
         return gm.forward
 
-    opt_fn = dynamo_mod.optimize(compiler_fn)(orig_fn)
+    if backend is None:
+        backend = compiler_fn
+
+    opt_fn = dynamo_mod.optimize(backend)(orig_fn)
     actual_res = opt_fn(*inputs)
     expected_res = orig_fn(*inputs)
     assert torch.allclose(expected_res, actual_res)
@@ -33,5 +36,5 @@ def run(dynamo_mod, orig_fn, inputs):
 fn_args = [ModelClass(), [get_example_batch(2),]]
 
 run([torchdynamo, mydynamo][
-1
-], *fn_args)
+0
+], *fn_args, backend="aot_nop")
