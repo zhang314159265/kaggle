@@ -1,0 +1,46 @@
+.version 7.6
+.target sm_52
+.address_size 64
+
+.visible .entry add(
+	.param .u64 param_a,
+	.param .u64 param_b,
+	.param .u64 param_c,
+	.param .u32 param_N
+) {
+	.reg .b64 %aptr_param_space, %bptr_param_space, %cptr_param_space;
+	.reg .b64 %aptr, %bptr, %cptr, %aloc, %bloc, %cloc;
+	.reg .b64 %idx_x4;
+	.reg .b32 %N, %idx, %b32temp<4>;
+	.reg .pred %cond_false;
+	.reg .f32 %aval, %bval, %cval;
+
+	ld.param.u64 %aptr_param_space, [param_a];
+	ld.param.u64 %bptr_param_space, [param_b];
+	ld.param.u64 %cptr_param_space, [param_c];
+	ld.param.u32 %N, [param_N];
+
+	// calculate idx
+	mov.u32 %b32temp0, %ntid.x; // ntid
+	mov.u32 %b32temp1, %ctaid.x; // blkid
+	mov.u32 %b32temp2, %tid.x; // tid
+	mad.lo.s32 %idx, %b32temp0, %b32temp1, %b32temp2;
+	setp.ge.s32 %cond_false, %idx, %N;
+	@%cond_false bra $L_next;
+
+	cvta.to.global.u64 %aptr, %aptr_param_space;
+	cvta.to.global.u64 %bptr, %bptr_param_space;
+	cvta.to.global.u64 %cptr, %cptr_param_space;
+	mul.wide.s32 %idx_x4, %idx, 4;
+	add.s64 %aloc, %aptr, %idx_x4;
+	add.s64 %bloc, %bptr, %idx_x4;
+	add.s64 %cloc, %cptr, %idx_x4;
+
+	ld.global.f32 %aval, [%aloc];
+	ld.global.f32 %bval, [%bloc];
+	add.f32 %cval, %aval, %bval;
+	st.global.f32 [%cloc], %cval;
+
+$L_next:
+	ret;
+}

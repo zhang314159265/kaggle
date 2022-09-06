@@ -3,9 +3,13 @@
 __pycache__/
 TODO
 *.so
+a.out
 
 cifar10_object_recognization/data/
 disaster_tweets/data/
 
 build/
 mydynamo.egg-info/
+
+add.ptx
+add.cubin

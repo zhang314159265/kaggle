@@ -30,11 +30,14 @@ def run(dynamo_mod, orig_fn, inputs, backend=None):
     actual_res = opt_fn(*inputs)
     expected_res = orig_fn(*inputs)
     assert torch.allclose(expected_res, actual_res)
+    actual_res.sum().backward() # trigger the backward graph compilation
     print(f"Pass test! Result is {actual_res}")
 
 # fn_args = [orig_fn, (torch.randn(10), torch.randn(10))]
 fn_args = [ModelClass(), [get_example_batch(2),]]
 
+from torchinductor import config
+config.debug = True
 run([torchdynamo, mydynamo][
 0
-], *fn_args, backend="aot_nop")
+], *fn_args, backend="inductor")
